@@ -20,7 +20,6 @@ using Soenneker.Utils.File.Download.Abstract;
 using System.Collections.Generic;
 namespace Soenneker.Lemlist.Runners.OpenApiClient.Utils;
 
-/// <inheritdoc cref="IFileOperationsUtil"/>
 public sealed class FileOperationsUtil : IFileOperationsUtil
 {
     private readonly ILogger<FileOperationsUtil> _logger;
@@ -87,54 +86,28 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
     public async ValueTask DeleteAllExceptCsproj(string directoryPath, CancellationToken cancellationToken = default)
     {
         if (!(await _directoryUtil.Exists(directoryPath, cancellationToken)))
+            throw new InvalidOperationException($"Generated source directory does not exist: {directoryPath}");
+
+        List<string> files = await _directoryUtil.GetFilesByExtension(directoryPath, "", true, cancellationToken);
+        foreach (string file in files)
         {
-            _logger.LogWarning("Directory does not exist: {DirectoryPath}", directoryPath);
-            return;
+            if (file.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            await _fileUtil.Delete(file, ignoreMissing: true, log: false, cancellationToken);
+            _logger.LogInformation("Deleted file: {FilePath}", file);
         }
 
-        try
+        List<string> dirs = await _directoryUtil.GetAllDirectoriesRecursively(directoryPath, cancellationToken);
+        foreach (string dir in dirs.OrderByDescending(static directory => directory.Length))
         {
-            // Delete all files except .csproj
-            List<string> files = await _directoryUtil.GetFilesByExtension(directoryPath, "", true, cancellationToken);
-            foreach (string file in files)
+            List<string> dirFiles = await _directoryUtil.GetFilesByExtension(dir, "", false, cancellationToken);
+            List<string> subDirs = await _directoryUtil.GetAllDirectories(dir, cancellationToken);
+            if (dirFiles.Count == 0 && subDirs.Count == 0)
             {
-                if (!file.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
-                {
-                    try
-                    {
-                        await _fileUtil.Delete(file, ignoreMissing: true, log: false, cancellationToken);
-                        _logger.LogInformation("Deleted file: {FilePath}", file);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to delete file: {FilePath}", file);
-                    }
-                }
+                await _directoryUtil.Delete(dir, cancellationToken);
+                _logger.LogInformation("Deleted empty directory: {DirectoryPath}", dir);
             }
-
-            // Delete all empty subdirectories
-            List<string> dirs = await _directoryUtil.GetAllDirectoriesRecursively(directoryPath, cancellationToken);
-            foreach (string dir in dirs.OrderByDescending(d => d.Length)) // Sort by depth to delete from deepest first
-            {
-                try
-                {
-                    List<string> dirFiles = await _directoryUtil.GetFilesByExtension(dir, "", false, cancellationToken);
-                    List<string> subDirs = await _directoryUtil.GetAllDirectories(dir, cancellationToken);
-                    if (dirFiles.Count == 0 && subDirs.Count == 0)
-                    {
-                        await _directoryUtil.Delete(dir, cancellationToken);
-                        _logger.LogInformation("Deleted empty directory: {DirectoryPath}", dir);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to delete directory: {DirectoryPath}", dir);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while cleaning the directory: {DirectoryPath}", directoryPath);
         }
     }
 
@@ -147,10 +120,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
         bool successful = await _dotnetUtil.Build(projFilePath, true, "Release", false, cancellationToken: cancellationToken);
 
         if (!successful)
-        {
-            _logger.LogError("Build was not successful, exiting...");
-            return;
-        }
+            throw new InvalidOperationException("Generated Lemlist client failed its Release build.");
 
         string gitHubToken = EnvironmentUtil.GetVariableStrict("GH__TOKEN");
         string name = EnvironmentUtil.GetVariableStrict("GIT__NAME");
